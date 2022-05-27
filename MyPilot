@@ -1,0 +1,1231 @@
+#!/bin/sh
+#  MyPilot
+#
+# Copyright (c) 2021, 2021, YinHai Software and/or its affiliates. All rights reserved.
+# 
+# You will not reverse engineer, decompiled, unwrapped or otherwise tamper this software.
+#
+# Version: v20220512
+#
+#
+# This file set up the MySQL 5.7 & 8.0 in Linux
+# MODIFIED  (MM/DD/YY)
+# juncai.chen  03/01/2021 - Creation
+# update5.7 by gongtangjie
+# update5.7 and 8.0 by gongtangjie by 20220329
+# add upgrade by juncai.chen 20220512
+# add upgrade by juncai.chen 20220519
+# add config replica by zhiyin.yang 20220520
+# fix bugs for  config replica by zhiyin.yang 20220523
+version="v20220523"
+install_log=mysql_install.log
+echo >$install_log
+# function for display color.
+echo_color() {
+  case $1 in
+    green)
+      echo -e "\033[32;40m$2\033[0m"cd 
+      ;;
+    red)
+      echo -e "\033[31;40m$2\033[0m"
+      ;;
+    redflicker)
+      echo -e "\033[1;5;41;33m$2\033[0m"
+      ;;
+    highlightbold)
+      echo -e "\033[1;41;33m$2\033[0m"
+      ;;
+    *)
+      echo "Example: echo_color red string"
+      ;;
+  esac
+}
+
+red="\033[31;40mERROR  \033[0m"
+green="\033[32;40mINFO   \033[0m"
+yellow="\033[33;40mWARNING\033[0m"
+date=$(date +%H:%M:%S)
+
+if [ `whoami` != "root" ];then
+    echo -e "[$red $(date +%H:%M:%S)]: The current user is not root."
+    echo -e "[$red $(date +%H:%M:%S)]: exit program."
+    exit 1
+fi
+
+function CheckIPAddress(){
+  echo $1 |grep "^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}$" > /dev/null
+  if [ $? -ne 0 ];  then
+  	echo -e "\n[$green $(date +%H:%M:%S)]: The ip address $1 format is incorrect."
+    return 1
+  else
+    a=`echo $1 | awk -F. '{print $1}'`
+    b=`echo $1 | awk -F. '{print $2}'`
+    c=`echo $1 | awk -F. '{print $3}'`
+    d=`echo $1 | awk -F. '{print $4}'`
+    #echo $a $b $c $d
+    for loop in $a $b $c $d
+    do
+      if [ $loop -ge 256 ] || [ $loop -lt 0 ]; then
+        echo -e "\n[$green $(date +%H:%M:%S)]: The ip address $1 format is incorrect."
+        return 1
+      fi
+    done
+    return 0
+  fi
+}
+
+function CheckPortFormat(){
+  echo $1 |[ -n "`sed -n '/^[0-9][0-9]*$/p'`" ]
+  if [ $? -ne 0 ]; then
+    echo -e "\n[$green $(date +%H:%M:%S)]: The port $1 format is incorrect."
+    return 1
+  else
+    if [ $1 -ge 65535 ] || [ $1 -lt 0 ]; then
+        echo -e "\n[$green $(date +%H:%M:%S)]: The port $1 format is incorrect."
+        return 1
+    fi
+    return 0
+  fi
+}
+
+#prepare install package
+prepare_pkg(){
+baseFilename=`ls -l mysql-${major}* 2>/dev/null|awk 'END {print $NF}'` 2>/dev/null 
+if [[ -f $baseFilename ]];then
+      version=`echo $baseFilename | cut -d'-' -f 2`
+else
+    echo -e "\n[$red $(date +%H:%M:%S)]: The mysql-${major} generic package not exist in current directory."
+    echo -e "\n[$red $(date +%H:%M:%S)]: exit program."
+    exit 1
+fi
+
+}
+
+#Check that mysqld is running
+check_mysql(){
+    pid=$(pgrep -f mysqld |tail  -1)
+    if [[ -n $pid ]];then 
+       echo -e "\n[$green $(date +%H:%M:%S)]: There is a mysql already running . The process id is $pid"
+       exit 1
+    fi
+}
+#check that /usr/local/mysql exist
+check_exist(){
+    if [ -L /usr/local/mysql ] || [ -d /usr/local/mysql ] || [ -f /usr/local/mysql ];then
+#       echo ""
+      # read -p "[Warning $(date +%H:%M:%S)]: /usr/local/mysql exists! Do you want to move it?[Y|N]:" decide
+ #      echo -e -n "[$yellow $(date +%H:%M:%S)]: /usr/local/mysql exists! Do you want to move it?[Y|N]:" 
+  #     read decide
+   #    case $decide in
+    #      [Yy])
+     #           mv /usr/local/mysql /usr/local/mysql.$(date +%Y%m%d)
+      #          ;;
+       #   *)
+                echo -e "\n[$red $(date +%H:%M:%S)]: Maybe mysql exist.please check or move /usr/local/mysql.then rerun `basename $0`"
+                exit 1
+       #esac
+    fi
+
+}
+
+check_mariadb(){
+   cnt=$(rpm -qa|grep mariadb* |wc -l)
+   if [ ${cnt} -gt 0 ]; then
+     echo -e "\n[$green $date]: begin deinstall mariadb..."
+     yum -y remove mariadb* >/dev/null
+     if [[ -n `grep mysql /etc/passwd` ]];then
+       userdel mysql >/dev/null
+       [ ! -d /home/mysql ] || rm -rf /home/mysql
+     fi
+     echo -e "\n[$green $date]: mariadb deinstall completed."
+  fi
+  
+}
+
+
+#check package libaio  
+check_package(){
+   cnt=$(rpm -qa|grep libaio|wc -l)
+   if [ ${cnt} -gt 0 ]; then
+     echo -e "\n[$green $date]: libaio is already installed"
+   else
+     echo -e "\n[$yellow $date]: libaio have not been installed"
+     echo -e "\n[$green $date]: begin install libaio..."
+     yum -q -y install libaio
+	if [ $? -eq 0 ];then
+           echo -e "\n[$green $date]: libaio install success."
+        else
+           echo -e "\n[$red $date]: libaio install failed.probably due to yum repository does not exist!"
+           echo -e "\n[$red $date]: please check & config yum repo or install libaio manually."
+	   exit 1
+        fi
+   fi
+}
+
+#check mysql & dependency package
+os_check(){
+  check_mysql
+  check_exist
+  check_mariadb
+  check_package
+  echo -e "\n[$green $(date +%H:%M:%S)]: OS Check success."
+
+}
+#setting install directory
+install_dir(){
+  #setting mysql install directory
+  #read -p "[INFO    $(date +%H:%M:%S)]: Enter MySQL install directory full path[]:" dir 
+  echo -e -n "[$green $(date +%H:%M:%S)]: Enter MySQL install directory full path[]:" 
+  read dir
+  if [ -z $dir ] || [[ $dir != /* ]];then
+     echo -e "\n[$red $(date +%H:%M:%S)]: MySQL install directory is invalid.\n"
+     install_dir
+  else
+     if [ -d $dir ];then
+	if [ -d $dir/mydata ]||[ -f $dir/mydata ];then
+           echo -e "\n[$red $(date +%H:%M:%S)]: MySQL $dir/mydata directory is exists.\n"
+           exit 1
+	else
+           mkdir $dir/mydata
+		   mkdir -p $dir/mydata/{data,InnoDB/{DoubleWrite,temp},log/{relaylog,genlog,binlog},temp}
+           echo -e "\n[$green $(date +%H:%M:%S)]: MySQL soft directory set to [/usr/local/mysql]."
+           echo -e "\n[$green $(date +%H:%M:%S)]: MySQL data directory set to [$dir/mydata/data].\n"
+	fi
+     else
+           mkdir -p $dir/mydata
+		   mkdir -p $dir/mydata/{data,InnoDB/{DoubleWrite,temp},log/{relaylog,genlog,binlog},temp}
+           echo -e "\n[$green $(date +%H:%M:%S)]: MySQL soft directory set to [/usr/local/mysql]."
+           echo -e "\n[$green $(date +%H:%M:%S)]: MySQL data directory set to [$dir/mydata/data].\n"
+
+     fi
+  fi
+}
+
+#add mysql user and group
+user_setting(){
+  #create mysql user and group
+  echo -e "[$green $(date +%H:%M:%S)]: Begin create MySQL group and user... \n"
+  #read -p "[INFO    $(date +%H:%M:%S)]: Enter MySQL Group[mysql]:" grp
+  echo -e -n "[$green $(date +%H:%M:%S)]: Enter MySQL Group[mysql]:" 
+  read grp
+  # if null default mysql
+  if [ -z $grp ];then
+	grp=mysql
+  fi
+  cnt=$(grep $grp /etc/group|wc -l)
+  if [ $cnt -eq 0 ]; then
+     groupadd $grp
+     echo -e "\n[$green $(date +%H:%M:%S)]: create MySQL group $grp success. \n"
+  else 
+     echo -e "\n[$yellow $(date +%H:%M:%S)]: mysql group $grp is already exists! \n"
+  fi
+  
+  #add mysql user 
+  #read -p "[INFO    $(date +%H:%M:%S)]: Enter MySQL User[mysql]:" usr
+  echo -e -n "[$green $(date +%H:%M:%S)]: Enter MySQL User[mysql]:" 
+  read usr
+  # if null default mysql
+  if [ -z $usr ];then
+	usr=mysql
+  fi
+  cnt=$(grep $usr /etc/passwd|wc -l)
+  if [ $cnt -eq 0 ]; then
+    useradd -g $grp -s /sbin/nologin $usr
+    echo -e "\n[$green $(date +%H:%M:%S)]: create MySQL user $usr success.\n"
+  else 
+    echo -e "\n[$yellow $(date +%H:%M:%S)]: mysql user $usr is already exists! \n "
+  fi
+  limitenv="\n* soft nofile 65535\n* hard nofile 65535\n* soft nproc 65535\n* hard nproc 65535\n"
+  grep -E "\* soft nofile" /etc/security/limits.conf >/dev/null 2>&1 || echo -e ${limitenv} >> /etc/security/limits.conf
+
+}
+
+#mysql setting
+mysql_setting(){
+  echo ""
+  #create mysql user and group
+  user_setting
+  #setting mysql data directory
+  install_dir 
+  #setting mysql data directory
+  #data_dir
+}
+
+#config my.cnf 
+config_mycnf(){
+ if [ -f /etc/my.cnf ];then
+     mv /etc/my.cnf /etc/my.cnf.$(date +%Y%m%d)
+ fi
+
+if [[ $version = 5.7* ]];then
+    cp ./my.cnf.5.7 /etc/my.cnf
+    #echo -e "[$green $(date +%H:%M:%S)]: copying of my.cnf succeeded"
+else 
+    cp ./my.cnf.8.0 /etc/my.cnf
+fi
+    #setting dir in /etc/my.cnf
+    echo -e "[$green $(date +%H:%M:%S)]: mysql config in /etc/my.cnf"
+
+    #setting directory
+    sed -in "s+/u01+$dir+g" /etc/my.cnf 
+
+    #setting buffer
+	yum install -y bc >/dev/null
+    buffer=`grep MemTotal /proc/meminfo |awk '{printf  ("%.0f\n", $2*0.6/1024)}'`
+	buffer=`echo "$buffer/1000*1024" |bc`
+    sed -in "s/2048M/${buffer}M/g" /etc/my.cnf
+     
+    #setting user
+    #grep user /etc/my.cnf |sed -in "s/mysql/$usr/g"
+    sed -in "/user/s/mysql/$usr/" /etc/my.cnf
+    #echo -e "[$red $(date +%H:%M:%S)]: The copy of the my.cnf failed with "$?
+}
+
+#untar mysql generic package to install directory
+gen_tar(){
+#baseFilename=`ls -1 mysql-$version*`
+baseFilename=`ls -l mysql-${major}*|awk 'END {print $NF}'` >>$install_log 2>&1
+if [ -f $baseFilename ];then
+    echo -e  "\n[$green $(date +%H:%M:%S)]: begin untar mysql generic package to $dir ...Est.20s"
+    if [[ $baseFilename == *xz ]];then
+       total_size=`xz --robot -l $baseFilename | grep 'totals' | awk '{print $5}'`    
+    else 
+       total_size=`gzip -l $baseFilename |tail -1| awk '{print $2}'`
+    fi
+    #echo -e "\n[$green $(date +%H:%M:%S)]: mysql generic package total_size:$total_size"
+    block_size=`expr $total_size / 51200`
+    block_size=`expr $block_size + 1 `
+    tar --blocking-factor=$block_size --checkpoint=0 --checkpoint-action='ttyout=......%u%\r' -xvf $baseFilename -C $dir >/dev/null
+    if [ $? -ne 0 ];then
+      echo -e "\n[$red $(date +%H:%M:%S)]: The untar failed with 2"
+      exit 1
+    fi
+    echo -e "\n[$green $(date +%H:%M:%S)]: untar mysql generic package to $dir completed."
+
+else
+     echo -e "\n[$red $(date +%H:%M:%S)]: mysql generic package not found! must place in the current directory."
+     exit 1
+fi
+
+}
+
+
+start_mysql(){
+
+echo -e "\n[$green $(date +%H:%M:%S)]: Starting MySQL server ... Est.30s"
+if [[ ! -d /usr/local/mysql/bin ]];then
+
+         echo -e "\n[$red $(date +%H:%M:%S)]: /usr/local/mysql/bin can not found,maybe mysql not exist!"
+         exit 1
+fi
+
+check_mysql
+
+#mysqld_safe &  >> $install_log 2>&1
+nohup mysqld_safe > /dev/null 2>&1 &
+sleep 10
+while true; 
+do
+  count=$(( $count + 1 ))
+  #if [[ -n $pid ]] && [[ $cnt -le 6 ]];then
+  if [[ ! -S `grep socket /etc/my.cnf |awk -F'=' 'END{print $2}'`  ]] && [[ $count -le 20 ]];then
+    sleep 10
+    continue
+  elif [[ ! -S `grep socket /etc/my.cnf |awk -F'=' 'END{print $2}'` ]] && [[ $count -eq 21 ]];then
+         #echo -e "\n[$red $(date +%H:%M:%S)]: The mysqld could not be stopped."
+         echo -e "\n[$red $(date +%H:%M:%S)]: The MySQL server is failed running."
+          exit 1
+  else 
+         pid=$(pgrep -f mysqld |tail  -1)
+         echo -e "\n[$green $(date +%H:%M:%S)]: The MySQL server has running successful. The process id is $pid.\n"
+         break;
+  fi
+
+done
+#     sleep 30
+#     pid=$(pgrep -f mysqld |tail  -1)
+#     #if [ -n $pid ];then
+#     if [[ -S `grep socket /etc/my.cnf |awk -F'=' 'END{print $2}'` ]];then
+#         echo -e "\n[$green $(date +%H:%M:%S)]: The MySQL server has running successful. The process id is $pid"
+#     else
+#         echo -e "\n[$red $(date +%H:%M:%S)]: The MySQL server is failed running."
+#         exit 1
+#     fi   
+
+}
+
+
+veripass(){
+pid=$(pgrep -f mysqld)
+if [[ -z $pid ]]; then
+    echo -e "[$yellow $(date +%H:%M:%S)]: Mysql Inactive."
+    start_mysql    
+    veripass
+    return;
+
+fi
+    #read -p "[INFO    $(date +%H:%M:%S)]: Enter your root password:" pass
+    echo -e -n "[$green $(date +%H:%M:%S)]: Enter mysql root password:" 
+    read pass
+# While string is empty...
+while [[ $pass == '' ]]
+do
+    echo -e "\n[$red $(date +%H:%M:%S)]: Password is Null ,try again!\n"
+    veripass
+done
+
+export MYSQL_PWD="$pass"
+
+mysqladmin -uroot  status >/dev/null 2>&1
+if [[ $? -ne 0 ]] ;
+then
+     cnt=$(( $cnt + 1 ))
+     if [ $cnt -lt 3 ];then
+          echo -e "\n[$red $(date +%H:%M:%S)]: Password wrong $cnt times,try again!\n"
+          veripass
+           # exit recursive
+            if [ $flag -eq 1 ];
+             then
+                return;
+             fi
+     else
+          echo -e "\n[$red $(date +%H:%M:%S)]: Password wrong $cnt times ,program terminated!\n"
+          exit 1
+     fi
+fi
+flag=1
+
+}
+
+
+stop_mysql(){
+
+echo -e "\n[$green $(date +%H:%M:%S)]: Stopping MySQL server ... Est.30s\n"
+pid=$(pgrep -f mysqld |tail  -1)
+if [[ -n $pid ]];then
+  #pkill mysqld >>$install_log 2>&1
+nohup  pkill mysqld >/dev/null 2>&1 &
+ #veripass
+#echo -e "[$green $(date +%H:%M:%S)]: Begin shutdown MySQL server...\n"
+ #mysqladmin -uroot -p$pass shutdown >>$install_log 2>&1
+  sleep 10
+while true; 
+do
+#  pid=$(pgrep -f mysqld |tail  -1)
+  cnt=$(( $cnt + 1 ))
+  #if [[ -n $pid ]] && [[ $cnt -le 6 ]];then
+  if [[ -f `grep pid-file /etc/my.cnf |awk -F'=' 'END{print $2}'`  ]] && [[ $cnt -le 10 ]];then
+    sleep 10
+    continue
+  elif [[ -f `grep pid-file /etc/my.cnf |awk -F'=' 'END{print $2}'` ]] && [[ $cnt -eq 11 ]];then
+          echo -e "[$red $(date +%H:%M:%S)]: The mysqld could not be stopped."
+          exit 1
+  else 
+         echo -e "[$green $(date +%H:%M:%S)]: MySQL server has been stopped."
+         break;
+  fi
+  
+done
+
+else
+         echo -e "[$red $(date +%H:%M:%S)]: There is no mysql server running.\n "
+fi
+
+}
+
+
+clean_mysql(){
+     echo -e "\n[$green $(date +%H:%M:%S)]: Starting deinstall MySQL...\n"
+     #echo -e "[$green $(date +%H:%M:%S)]: You need to double check root password.\n"
+#echo -e "[$green $(date +%H:%M:%S)]: Begin mysql clean... "
+veripass
+stop_mysql
+sleep 5
+#pid=$(pgrep -f mysqld)
+#if [[ -n $pid ]]; then
+#    stop_mysql
+#    clean_mysql
+#    return;
+#else
+   if [ -f /etc/my.cnf ];then
+    user=`grep user /etc/my.cnf|awk -F'=' '{print $2}'`
+    basedir=`ls -l /usr/local/mysql |awk -F'->' '{print $2}'`
+    datadir=`grep datadir /etc/my.cnf|awk -F'=' '{print $2}'`
+    
+     if [ -d $basedir ];then
+       rm -rf $basedir
+     fi
+
+     if [ -d $datadir ];then
+       rm -rf $datadir
+     fi
+
+     if [ -n `grep $user /etc/passwd` ];then
+       userdel -rf $user >/dev/null
+       [ ! -d /home/$user ] || rm -rf /home/$user
+     fi
+
+     if [ -L /usr/local/mysql ];then
+       real=`ls -l /usr/local/mysql |awk -F'->' '{print $2}'`
+       if [ -n $real ];then
+          rm -rf $real
+       fi
+       rm -rf /usr/local/mysql
+     fi
+    rm -rf /etc/my.cnf
+    echo -e "\n[$green $(date +%H:%M:%S)]: deinstall MySQL completed.\n"
+    #echo -e "\n[$green $(date +%H:%M:%S)]: MySQL clean completed."
+  fi
+#fi
+}
+
+#change mysql root password
+change_pass(){
+pid=$(pgrep -f mysqld |tail  -1)
+if [ -z "$pid" ]; then
+         echo -e "[$red $(date +%H:%M:%S)]: The MySQL server not running.start mysql server first!"
+         exit 1
+fi
+
+#read -p "[INFO    $(date +%H:%M:%S)]: Enter your old password:" former # Ask the user to enter a string
+  echo -e -n "[$green $(date +%H:%M:%S)]: Enter your old password:" 
+  read former
+echo ""
+#while [[ $former == '' ]] # While string is empty...
+#do
+     #echo -e "\n[$red $(date +%H:%M:%S)]: new password can not be null.\n"
+#     read -p "[INFO    $(date +%H:%M:%S)]: Enter your old password:" former # Ask the user to enter a string
+#     echo ""
+#done 
+
+# While string is empty...
+while [[ $former == '' ]]
+do
+    echo -e "[$red $(date +%H:%M:%S)]:Old password is Null ,try again!\n"
+    change_pass
+    echo ""
+done
+
+# check current pass
+mysqladmin -uroot -p${former} status >/dev/null 2>&1
+if [ $? -ne 0 ] ;
+then
+     cnt=$[$cnt+1]
+     if [ $cnt -lt 3 ];then
+          echo -e "[$red $(date +%H:%M:%S)]: Old password wrong $cnt times,try again!\n"
+          change_pass
+     else
+          echo -e "[$red $(date +%H:%M:%S)]: Old password wrong $cnt times ,change password terminated!\n"
+          exit 1
+     fi
+fi
+
+# check super_read_only is on 
+export MYSQL_PWD=$former
+if [ "$(mysql -e "show variables like 'super_read_only';"|grep "super_read_only"|awk '{print $2}')" = "ON" ]; then
+  echo -e "[$red $(date +%H:%M:%S)]: super_read_only is ON,change password not permitted!\n"
+  exit 1
+fi
+unset MYSQL_PWD
+
+while [[ $newer == '' ]] # While string is empty...
+do
+     #echo -e "\n[$red $(date +%H:%M:%S)]: new password can not be null.\n"
+     #read -p "[INFO    $(date +%H:%M:%S)]: Enter your new password:" newer # Ask the user to enter a string
+     echo -e -n "[$green $(date +%H:%M:%S)]: Enter your new password:" 
+     read newer
+     echo ""
+done 
+
+mysqladmin -uroot -p$former password $newer 2>> $install_log
+if [ $? = 0 ];then 
+     echo -e "[$green $(date +%H:%M:%S)]: change mysql root password was successful.new password is [`echo_color red $newer`].\n"
+     exit 1
+else
+     echo -e "[$red $(date +%H:%M:%S)]: change mysql root password failed.see $install_log" 
+     exit 1
+fi 
+
+}
+
+#initilize mysql
+init_mysql(){
+ ln -s $dir/mysql-$version-* /usr/local/mysql
+ data_home=$dir/mydata
+ chown -R $usr:$grp /usr/local/mysql/
+ chown -R $usr:$grp /usr/local/mysql
+ chown -R $usr:$grp $data_home
+    if [ -z "`grep /usr/local/mysql/bin /etc/profile`" ];then
+      echo "export PATH=/usr/local/mysql/bin:\$PATH">>/etc/profile
+    fi
+    source  /etc/profile
+ echo -e "\n[$green $(date +%H:%M:%S)]: begin MySQL initilize...Est.30s"
+ #mysqld --defaults-file=/etc/my.cnf --basedir=/usr/local/mysql --datadir=$dir/mydata --user=mysql  --initialize  >$install_log 2>&1
+ mysqld --defaults-file=/etc/my.cnf --basedir=/usr/local/mysql --datadir=$dir/mydata/data --user=$usr  --initialize >>$install_log 2>&1
+ if [ $? -ne 0 ];then
+    echo -e "\n[$red $(date +%H:%M:%S)]: MySQL initilize failed,check $install_log"
+    clean_mysql
+    echo -e "\n[$red $(date +%H:%M:%S)]: MySQL initilize failed,check $install_log and rerun $0"
+    exit 1
+ else
+    echo -e "\n[$green $(date +%H:%M:%S)]: MySQL initilize success."
+ fi
+}
+
+post_mysql(){
+#####change defaul root password
+pid=$(pgrep -f mysqld |tail  -1)
+if [ -n "$pid" ]; then
+  oldpass=`grep 'temporary password' $dir/mydata/log/genlog/mysql-err.log |tail -1|awk '{print $NF}'`
+  echo -e "\n[$green $(date +%H:%M:%S)]: Change MySQL default password [$oldpass],Est.30s"
+  #sleep 30
+
+set $version
+ver=$1
+IFS="."
+set $1
+major_ver=$1
+middle_ver=$2
+minor_ver=$(echo $3 | cut -d'-' -f 1)
+unset IFS
+
+#newpass="Yhsql${major_ver}${middle_ver}${minor_ver}_`date +%Y%m%d`"
+newpass="Yinhaidb#2020!"
+
+while true
+do
+  if [ -S $dir/mydata/temp/mysql.sock ] ;then
+      break
+  else
+     sleep 5
+     continue
+  fi
+done
+
+  mysqladmin -uroot -p$oldpass password $newpass 2>> $install_log
+ if [ $? -eq 0 ];then
+    echo "Mysql default root password is $newpass" >> $install_log
+    echo -e "\n[$green $(date +%H:%M:%S)]: MySQL `echo_color red root` password is [`echo_color red $newpass ,port 5577`].Saved in $install_log!"
+    echo -e "\n[$green $(date +%H:%M:%S)]: Congratulations!MySQL Server has been deployed successfully,Enjoy it!"
+    echo -e "\n[$green $(date +%H:%M:%S)]: Please open a new shell session use it!"
+ else
+    echo -e "\n[$red $(date +%H:%M:%S)]: Change MySQL password failed."
+    echo -e "\n[$yellow $(date +%H:%M:%S)]: MySQL Server install success,but default password [$oldpass] change faild.please change it mannualy."
+    exit 1
+ fi
+else
+    echo -e "\n[$yellow $(date +%H:%M:%S)]: MySQL Server install success,but default password [$oldpass] not changed.please check mysql status."
+   exit 1
+fi
+######add backup user
+export MYSQL_PWD="$newpass"
+###add physical backup user
+mysql -uroot  -e 'create user IF NOT EXISTS "backup"@"localhost" identified WITH 'mysql_native_password' by "Yinhaidb#2020!backup";' > /dev/null 2>&1
+mysql -uroot  -e 'grant RELOAD,PROCESS,LOCK TABLES,REPLICATION CLIENT on *.* to "backup"@"localhost";' > /dev/null 2>&1
+###add logical backup user
+mysql -uroot -e 'create user IF NOT EXISTS "backupdump"@"localhost" identified WITH 'mysql_native_password' by "Yinhaidb#2020!backup";' > /dev/null 2>&1
+mysql -uroot -e 'grant SELECT, RELOAD, LOCK TABLES, REPLICATION CLIENT, SHOW VIEW, EVENT, TRIGGER,PROCESS on *.* to "backupdump"@"localhost";' > /dev/null 2>&1
+
+###add binlog backup user
+mysql -uroot -e 'create user IF NOT EXISTS "backupbinlog"@"localhost" identified WITH 'mysql_native_password' by "Yinhaidb#2020!binlog";' > /dev/null 2>&1
+mysql -uroot -e 'grant RELOAD, PROCESS, REPLICATION CLIENT, REPLICATION SLAVE on *.* to "backupbinlog"@"localhost";' > /dev/null 2>&1
+
+mysql -uroot -e 'flush privileges;' > /dev/null 2>&1
+
+}
+upgrade(){
+echo ""
+#check current mysql status
+pid=$(pgrep -f mysqld)
+if [[ -z $pid ]]; then
+    echo -e "[$yellow $(date +%H:%M:%S)]: mysql inactive"
+    start_mysql
+#    echo ""
+    upgrade
+    return;
+fi
+#get current minor version
+veripass
+
+cur_ver=`mysqladmin -uroot version |grep "Server version"|awk '{print $3}'|awk -F'-' '{print $1}'`
+cur_a=`echo $cur_ver|awk -F'.' '{print $1}'`
+cur_b=`echo $cur_ver|awk -F'.' '{print $2}'`
+cur_c=`echo $cur_ver|awk -F'.' '{print $3}'`
+  echo -e "\n[$green $(date +%H:%M:%S)]: Current MySQL version is $cur_ver"
+
+  #echo -e "\n[$green $(date +%H:%M:%S)]: Current MySQL minor version is $minor"
+
+#check newer version generic package exist
+#major=5.7
+major=$cur_a.$cur_b
+prepare_pkg
+new_ver=`echo $version`
+new_a=`echo $version|awk -F'.' '{print $1}'`
+new_b=`echo $version|awk -F'.' '{print $2}'`
+new_c=`echo $version|awk -F'.' '{print $3}'`
+if [[ $new_a -eq $cur_a ]] && [[ $new_b -eq $cur_b ]] && [[ $new_c -gt $cur_c ]];then
+  echo -e "\n[$green $(date +%H:%M:%S)]: New MySQL version is $new_ver.\n"
+#  echo -e "\n[$green $(date +%H:%M:%S)]: New MySQL minor version is $new_minor."
+else
+  echo -e "\n[$yellow $(date +%H:%M:%S)]: There is no higer generic package version exists or not support upgrade between 5.7 and 8.0."
+  echo -e "\n[$red $(date +%H:%M:%S)]: Upgrade terminated."
+  exit 1
+fi
+
+  echo -e "[$green $(date +%H:%M:%S)]: Start upgrade MySQL version from $cur_ver to $new_ver."
+
+mysql -uroot --execute="SET GLOBAL innodb_fast_shutdown=0" >>$install_log 2>&1
+
+stop_mysql
+
+echo -e "\n[$green $(date +%H:%M:%S)]: Untar and Relink generic package..."
+basedir=`ls -l /usr/local/|awk  -F'/' '/mysql/{print $2}'`
+usr=`ls -l /usr/local/mysql/|awk 'END {print $3}'`
+grp=`ls -l /usr/local/mysql/|awk 'END {print $4}'`
+
+
+ tar -xvf $baseFilename -C /$basedir >/dev/null 
+ unlink /usr/local/mysql
+ ln -s /$basedir/mysql-$new_ver-* /usr/local/mysql
+ chown -R $usr:$grp /usr/local/mysql/
+
+echo -e "\n[$green $(date +%H:%M:%S)]: Untar and Relink generic package completed."
+
+start_mysql
+#sleep 10
+
+echo -e "\n[$green $(date +%H:%M:%S)]: Exec mysql_upgrade..."
+mysql_upgrade -uroot  >>$install_log 2>&1
+
+stop_mysql
+#sleep 10
+
+start_mysql
+#sleep 10
+
+  echo -e "\n[$green $(date +%H:%M:%S)]: Mysql upgrade successful!"
+
+exit 1
+}
+setservice(){
+source /etc/profile
+#cp ${dir}/mysql-5.7.32-linux-glibc2.12-x86_64/support-files/mysql.server /etc/init.d/mysqld
+cd $dir/mysql-$version-*
+cp support-files/mysql.server /etc/init.d/mysqld
+cp bin/mysql /usr/bin/
+chkconfig --add mysqld
+chkconfig mysqld on
+systemctl restart mysqld
+}
+
+install_57(){
+
+  echo -e "\n[$green $(date +%H:%M:%S)]: Starting install MySQL $version..."
+  #echo -e "\n[$green $(date +%H:%M:%S)]: Checking and Setting OS environment..."
+  os_check
+  mysql_setting
+  config_mycnf
+  gen_tar
+  init_mysql
+  start_mysql
+  setservice
+  post_mysql
+  exit 1
+
+}
+
+install_80(){
+
+  echo -e "\n[$green $(date +%H:%M:%S)]: Starting install MySQL $version..."
+  os_check
+  mysql_setting
+  config_mycnf
+  gen_tar
+  init_mysql
+  start_mysql
+  setservice
+  post_mysql
+  exit 1
+}
+
+
+deinstall(){
+warn=`echo_color redflicker "Danger!!!"`
+    echo "***********************************************************************"
+    echo "                        $warn"
+    #echo "*1.This option could damage your current database environemt.         *"
+    #echo "*2.You have all proper backups on Place before executing this program.*"
+    #echo "*3.Never run this option in a Production Environment.                 *"
+    #echo "*4.You are running this program under your own responsability.        *"
+  echo_color red "  This option could damage your current database environemt.
+  You have all proper backups on Place before executing this program.
+  Never run this option in a Production Environment.
+  You are running this program under your own responsability."
+    echo "***********************************************************************"
+    echo ""
+  #read -p "[INFO    $(date +%H:%M:%S)]: Do you accept this Terms and Continue? [Y/N]:" opt
+  echo -e -n "[$green $(date +%H:%M:%S)]: Do you accept this Terms and Continue? [Y/N]:" 
+  read opt
+  case ${opt} in
+    Y|y)
+     #veripass
+     clean_mysql
+     exit 0
+      ;;
+    *)
+      echo -e "\n[$green $(date +%H:%M:%S)]: Exit this program.\n"
+      exit 0
+      ;;
+
+  esac
+}
+
+
+back_dir(){
+  #setting mysql install directory
+  #read -p "[INFO    $(date +%H:%M:%S)]: Enter MySQL backup directory full path[]:" backdir 
+  echo ""
+  echo -e -n "[$green $(date +%H:%M:%S)]: Enter MySQL backup directory full path[]:" 
+  read backdir
+  if [ -z $backdir ] || [[ $backdir != /* ]];then
+     echo -e "\n[$red $(date +%H:%M:%S)]: MySQL back directory is invalid.\n"
+     back_dir
+  else
+     mkdir -p ${backdir}/mysqlbak
+  fi
+}
+phisycalback(){
+	[ -d ${backdir}/mysqlbak/backup ] && echo "${backdir}/mysqlbak/backup id exists" && exit 1
+	echo -e "\n[$green $(date +%H:%M:%S)]: setting phisycal backup ..."
+	mkdir -p ${backdir}/mysqlbak/{scripts,backup}
+	mkdir -p ${backdir}/mysqlbak/backup/{FULLBACKUP,INCREMENT_BACKUP}
+	chown -R mysql:mysql ${backdir}/mysqlbak/
+	yum -y install rsync perl perl-Digest-MD5 > /dev/null 2>&1
+	yum install -y libev-4.15-7.el7.x86_64.rpm > /dev/null 2>&1
+	#yum install -y percona-xtrabackup-24-2.4.24-1.el7.x86_64.rpm > /dev/null 2>&1
+	#create user "backup"@"localhost" identified WITH 'mysql_native_password' by "Yinhaidb#2020!backup";
+	#grant RELOAD,PROCESS,LOCK TABLES,REPLICATION CLIENT on *.* to "backup"@"localhost";
+	#flush privileges;
+#	mysql -uroot -'pYinhaidb#2020!' -e 'create user "backup"@"localhost" identified WITH 'mysql_native_password' by "Yinhaidb#2020!backup";' > /dev/null 2>&1
+#	mysql -uroot -'pYinhaidb#2020!' -e 'grant RELOAD,PROCESS,LOCK TABLES,REPLICATION CLIENT on *.* to "backup"@"localhost";' > /dev/null 2>&1
+#	mysql -uroot -'pYinhaidb#2020!' -e 'flush privileges;' > /dev/null 2>&1
+	version=`/usr/local/mysql/bin/mysql -V|grep 5.7|awk  '{print $5}'|awk -F '.' '{print $1}'`
+	if [ "${version}" == '5' ];then
+		yum install -y percona-xtrabackup-24-*.el7.x86_64.rpm > /dev/null 2>&1
+	else
+		yum install -y percona-xtrabackup-80-*.el7.x86_64.rpm > /dev/null 2>&1
+		mysql -uroot -'pYinhaidb#2020!' -e 'grant select on *.* to 'backup'@'localhost';' > /dev/null 2>&1
+		mysql -uroot -'pYinhaidb#2020!' -e 'grant BACKUP_ADMIN on *.* to backup@'localhost';' > /dev/null 2>&1
+	fi
+	cp Xtrabackup.sh ${backdir}/mysqlbak/scripts
+	sed -i "s+/u02+$backdir+g" ${backdir}/mysqlbak/scripts/Xtrabackup.sh
+	chmod +x ${backdir}/mysqlbak/scripts/Xtrabackup.sh
+	echo "0 1 * * 6 . ${backdir}/mysqlbak/scripts/Xtrabackup.sh 0" >> /var/spool/cron/root 
+	echo "0 3 * * 0,1,2,3,4,5 . ${backdir}/mysqlbak/scripts/Xtrabackup.sh 1" >> /var/spool/cron/root
+	echo -e "\n[$green $(date +%H:%M:%S)]: setting phisycalback success"
+	echo -e "\n[$green $(date +%H:%M:%S)]: begin full backup ..."
+	${backdir}/mysqlbak/scripts/Xtrabackup.sh 0
+	echo -e "\n[$green $(date +%H:%M:%S)]: full backup is OK."
+}
+
+logicalback(){
+	[ -d ${backdir}/mysqlbak/dump ] && echo "${backdir}/mysqlbak/dump id exists" && exit 1
+	mkdir -p ${backdir}/mysqlbak/{scripts,dump}
+	chown -R mysql:mysql ${backdir}/mysqlbak
+#	mysql -uroot -'pYinhaidb#2020!' -e 'create user "backupdump"@"localhost" identified WITH 'mysql_native_password' by "Yinhaidb#2020!backup";' > /dev/null 2>&1
+#	mysql -uroot -'pYinhaidb#2020!' -e 'grant SELECT, RELOAD, LOCK TABLES, REPLICATION CLIENT, SHOW VIEW, EVENT, TRIGGER,PROCESS on *.* to "backupdump"@"localhost";' > /dev/null 2>&1
+	cp dumpbackup.sh ${backdir}/mysqlbak/scripts
+	sed -i "s+/u02+$backdir+g" ${backdir}/mysqlbak/scripts/dumpbackup.sh
+	chmod +x ${backdir}/mysqlbak/scripts/dumpbackup.sh
+	echo "0 1 * * 0,2,4 . ${backdir}/mysqlbak/scripts/dumpbackup.sh" >> /var/spool/cron/root
+	#create user "backupdump"@"localhost" identified WITH 'mysql_native_password' by "Yinhaidb#2020!backup";
+	#grant SELECT, RELOAD, LOCK TABLES, REPLICATION CLIENT, SHOW VIEW, EVENT, TRIGGER,PROCESS on *.* to "backupdump"@"localhost";
+	#chmod u+x /u01/mydata/mysqlbak.sh
+	#0 0 * * * . /u01/mydata/mysqlbak.sh
+	echo -e "\n[$green $(date +%H:%M:%S)]: set back dump success"
+}
+
+binlogback(){
+	[ -d ${backdir}/mysqlbak/binlog ] && echo "${backdir}/mysqlbak/binlog id exists" && exit 1
+	mkdir -p ${backdir}/mysqlbak/{scripts,binlog}
+	chown -R mysql:mysql ${backdir}/mysqlbak
+#	mysql -uroot -'pYinhaidb#2020!' -e 'create user "backupbinlog"@"127.0.0.1" identified WITH 'mysql_native_password' by "Yinhaidb#2020!binlog";' > /dev/null 2>&1
+#	mysql -uroot -'pYinhaidb#2020!' -e 'grant RELOAD, PROCESS, REPLICATION CLIENT, REPLICATION SLAVE on *.* to "backupbinlog"@"127.0.0.1";' > /dev/null 2>&1
+	cp syncbinlog.sh ${backdir}/mysqlbak/scripts
+	cp startbinlog.sh ${backdir}/mysqlbak/scripts
+	sed -i "s+/u02+$backdir+g" ${backdir}/mysqlbak/scripts/syncbinlog.sh
+	sed -i "s+/u02+$backdir+g" ${backdir}/mysqlbak/scripts/startbinlog.sh
+	chmod +x ${backdir}/mysqlbak/scripts/syncbinlog.sh
+	chmod +x ${backdir}/mysqlbak/scripts/startbinlog.sh
+	cd ${backdir}/mysqlbak/scripts && nohup ./syncbinlog.sh & 
+	echo "*/10 * * * * . ${backdir}/mysqlbak/scripts/startbinlog.sh" >> /var/spool/cron/root
+	echo -e "\n[$green $(date +%H:%M:%S)]: set back binlog success"
+}
+
+#####mydumper logical backup
+install_mydumper(){
+
+#if -f mydumper-0.12.3-1.el7.x86_64.rpm ;then
+if [ -f mydumper-0.12.*-1.el7.x86_64.rpm ];then
+    echo -e "\n[$green $(date +%H:%M:%S)]: begin install mydumper..."
+    rpm -ivh mydumper-0.12.*-1.el7.x86_64.rpm >/dev/null 2>&1
+    if [ $? -eq 0 ];
+      then
+      echo -e  "\n[$green $(date +%H:%M:%S)]: `mydumper -V` install success."
+    else
+      echo -e  "\n[$red $(date +%H:%M:%S)]: mydumper install failed,please install manual."
+      exit 1
+    fi
+else
+   echo -e  "\n[$red $(date +%H:%M:%S)]: mydumper rpm not exists."
+   exit 1
+fi
+
+}
+dump_dir(){
+  #read -p "[INFO    $(date +%H:%M:%S)]: Enter MySQL dump directory absolute path[]:" dir
+  echo -e -n "\n[$green $(date +%H:%M:%S)]: Enter MySQL dump directory absolute path[]:" 
+  read dir
+  if [ -z $dir ] || [[ $dir != /* ]];then
+     echo -e "\n[$red $(date +%H:%M:%S)]: MySQL dump directory is invalid.\n"
+     dump_dir
+  else
+     if [ -d $dir ];then
+           echo -e "\n[$green $(date +%H:%M:%S)]: MySQL dump directory set to [$dir].\n"
+     else 
+           echo -e "\n[$red $(date +%H:%M:%S)]: [$dir] No such file or directory!\n"
+	   dump_dir
+     fi
+  fi
+}
+full_dump(){
+dump_dir
+echo -e "[$green $(date +%H:%M:%S)]: begin dump full database ......"
+echo -e "begin $(date)" > $dir/dump_${DT}.log
+mydumper  -u $USER -p $PASS -o ${dir}/full_${DT}  -F 10240 --less-locking -L ${dir}/full_${DT}.log -v 3 -K
+if [ $? -eq 0 ];
+  then
+        echo -e "\n[$green $(date +%H:%M:%S)]: dump success!see log ${dir}/full_${DT}.log\n"
+        echo "dump success!" >>${dir}/dump_${DT}.log
+  else
+        echo -e "\n[$red $(date +%H:%M:%S)]: dump failed! see log ${dir}/full_${DT}.log" 
+        echo "dump failed!" >>${dir}/dump_${DT}.log
+fi
+
+echo "end $(date)" >>$dir/dump_${DT}.log
+
+exit $?
+}
+
+
+part_dump(){
+dump_dir
+#read -p "[INFO    $(date +%H:%M:%S)]: Enter Database to dump,use comma separator[]:" DB
+  echo -e -n "[$green $(date +%H:%M:%S)]: Comma delimited database list to dump[as db1,db2]:" 
+  read DB
+echo -e "\n[$green $(date +%H:%M:%S)]: begin dump database [$DB] ......"
+echo -e "begin $(date)" > $dir/dump_${DT}.log
+mydumper  -u $USER -p $PASS -B $DB -o ${dir}/db_${DT}  -F 10240 --less-locking -L ${dir}/db_${DT}.log -v 3 -K
+if [ $? -eq 0 ];
+  then
+        echo -e "\n[$green $(date +%H:%M:%S)]: dump success!see log ${dir}/db_${DT}.log\n"
+        echo "dump success!" >>${dir}/dump_${DT}.log
+  else
+        echo -e "\n[$red $(date +%H:%M:%S)]: dump failed! see log ${dir}/db_${DT}.log" 
+        echo "dump failed!" >>${dir}/dump_${DT}.log
+fi
+
+echo "end $(date)" >>$dir/dump_${DT}.log
+
+exit $?
+}
+
+tables_dump(){
+dump_dir
+#read -p "[INFO    $(date +%H:%M:%S)]: Enter tables to dump,use comma separator[db1.tb1,db2.tb2]:" TB
+  echo -e -n "[$green $(date +%H:%M:%S)]: Comma delimited table list to dump[as db1.tb1,db2.tb2]:" 
+  read TB
+echo -e "\n[$green $(date +%H:%M:%S)]: begin dump table [$TB] ......"
+echo -e "begin $(date)" > $dir/dump_${DT}.log
+mydumper  -u $USER -p $PASS -T $TB -o ${dir}/tb_${DT}  -F 10240 --less-locking -L ${dir}/tb_${DT}.log -v 3 -K
+if [ $? -eq 0 ];
+  then
+        echo -e "\n[$green $(date +%H:%M:%S)]: dump success!see log ${dir}/tb_${DT}.log\n"
+        echo "dump success!" >>${dir}/dump_${DT}.log
+  else
+        echo -e "\n[$red $(date +%H:%M:%S)]: dump failed! see log ${dir}/tb_${DT}.log" 
+        echo "dump failed!" >>${dir}/dump_${DT}.log
+fi
+
+echo "end $(date)" >>$dir/dump_${DT}.log
+
+exit $?
+}
+dump_option(){
+
+DT=$(date +%Y%m%d%H)
+#Username with the necessary privileges
+USER=backupdump
+#User password
+PASS="Yinhaidb#2020!backup"
+
+#read -n1 -p "Please Enter your dump type []:" option
+echo -e -n "[$green $(date +%H:%M:%S)]: Please Enter your dump type []:" 
+read -n1 option
+    echo ""
+    case ${option} in
+    0)
+      full_dump
+      exit 1
+      ;;
+    1)
+      part_dump
+      exit 1
+      ;;
+    2)
+      tables_dump
+      exit 1
+      ;;
+    q)
+      echo -e "\n[$green $(date +%H:%M:%S)]: Exit dump.\n"
+      exit 0
+      ;;
+    *)
+      echo -e "\n[$yellow $(date +%H:%M:%S)]: Bad Choice!Again.\n"
+      dump_option
+      ;;
+    esac
+}
+
+config_slave() {
+  echo ""
+  veripass
+  local_port=$(cat /etc/my.cnf|grep port|awk -F '=' '{print $2}'|head -n1)
+  slave_version=$(mysqladmin -uroot  version | grep -E "Server version"|awk '{print $3}')
+  #check is or not a slave
+  master_ip=$(mysql -e "show slave status\G"|grep Master_Host:|awk -F ':' '{print $2}')
+  master_port=$(mysql -e "show slave status\G"|grep Master_Port:|awk -F ':' '{print $2}')
+  if [[ -n ${master_ip} ]] || [[ -n ${master_port} ]];then
+    echo -e "\n[$red $(date +%H:%M:%S)]: This server is already a slave,the master ip is ${master_ip} and the master port is ${master_port}!"
+	exit 1;
+  fi
+  
+  #get master's information
+  j=1
+  while [ "$j" -lt "2" ]
+  do
+  	echo -n -e "\n[$green $(date +%H:%M:%S)]: Please input master node's ip_addr []:"
+    read ms_host
+    CheckIPAddress $ms_host
+    if [ $? -eq 0 ];  then
+  	  j=2
+  	fi
+  done
+  
+  j=1
+  while [ "$j" -lt "2" ]
+  do
+  	echo -n -e "\n[$green $(date +%H:%M:%S)]: Please input master node's database_port []:"
+    read ms_port
+    CheckPortFormat $ms_port
+    if [ $? -eq 0 ];  then
+  	  j=2
+  	fi
+  done
+  
+  echo -n -e "\n[$green $(date +%H:%M:%S)]: Please input master node's repluser []:"
+  read ms_user
+  
+  echo -n -e "\n[$green $(date +%H:%M:%S)]: Please input master node's repluser_password []:"
+  read ms_pwd
+  
+  mysql -h ${ms_host} -P ${ms_port} -u ${ms_user} -p${ms_pwd} -e "select 1 from dual;" > /dev/null 2>&1
+  if [ $? -ne 0 ];then
+    echo -e "\n[$red $(date +%H:%M:%S)]: Wrong master information,please resume load or create repluser in master!"
+	config_slave
+	exit 1;
+  fi
+  
+  #get master's server_id
+  export MYSQL_PWD="${ms_pwd}"
+  ms_server_id=$(mysql -h ${ms_host} -P ${ms_port} -u ${ms_user} -e "show variables like 'server_id';"|grep server_id|awk '{print $2}')
+  master_version=$(mysqladmin -h ${ms_host} -P ${ms_port} -u ${ms_user}  version | grep -E "Server version"|awk '{print $3}')
+  if [ "$slave_version" != "$master_version" ];then
+     echo -e "\n[$red $(date +%H:%M:%S)]: The master version $master_version is not same as the slave version $slave_version."
+     exit 1
+  fi
+  #input slave's server_id
+  j=1
+  while [ "$j" -lt "2" ];do
+    echo -en "\n[$green $(date +%H:%M:%S)]: Please Enter slave's server id:"
+    read sl_server_id
+	if ! expr ${sl_server_id} + 1 >/dev/null 2>&1;then
+      echo -e "\n[$red $(date +%H:%M:%S)]: Not number,please enter a number!"
+      continue
+    fi
+	if [ ${sl_server_id} -lt 0 ];then
+	  echo -e "\n[$red $(date +%H:%M:%S)]: Less than 0,please enter a number greater than 0!"
+	  continue
+	fi
+    if [ $sl_server_id = $ms_server_id ];then
+      echo -e "\n[$red $(date +%H:%M:%S)]: The slave's server id cannot be the same as the master's server-id!"
+    else
+      j=2
+    fi
+  done
+   echo -e "\n[$green $(date +%H:%M:%S)]: The slave's server id ready to change to ${sl_server_id}...est.20s"
+  
+  # config Master-slave information
+  #export MYSQL_PWD=${local_pass}
+  export MYSQL_PWD="${pass}"
+  sed -i "s/^server-id.*/server-id\ =\ ${sl_server_id}/g" /etc/my.cnf
+  systemctl restart mysqld
+  new_server_id=$(mysql -uroot -P ${local_port} -e "show variables like 'server_id';"|grep server_id|awk '{print $2}')
+  echo -e "\n[$green $(date +%H:%M:%S)]: This server's new server id is ${new_server_id}"
+  mysql -uroot -P ${local_port} -e "CHANGE MASTER TO MASTER_HOST='${ms_host}', MASTER_USER='${ms_user}',MASTER_PASSWORD='${ms_pwd}',MASTER_PORT=${ms_port},MASTER_AUTO_POSITION = 1;" > /dev/null 2>&1
+  mysql -uroot -P ${local_port} -e "start slave;"
+  sleep 10
+  if ! mysqladmin -uroot status > /dev/null 2>&1;then
+    echo -e "\n[$yellow $(date +%H:%M:%S)]: The slave root password has reset,please enter master root@localhost password.\n"
+    veripass
+  fi
+  io_thread=$(mysql -uroot -P ${local_port} -e "show slave status\G"|grep Slave_IO_Running:|awk -F ':' '{print $2}')
+  sql_thread=$(mysql -uroot -P ${local_port} -e "show slave status\G"|grep Slave_SQL_Running:|awk -F ':' '{print $2}')
+  if [ $io_thread = "Yes" ] > /dev/null 2>&1;then
+    if [ $sql_thread = "Yes" ] > /dev/null 2>&1;then
+	  echo -e "\n[$green $(date +%H:%M:%S)]: MySQL slave node is running!"
+	  sed -i "s/^#read-only=1/read-only=1/g" /etc/my.cnf
+	  sed -i "s/#super_read_only=1/super_read_only=1/g" /etc/my.cnf
+	  mysql -uroot -P ${local_port} -e "set global read_only=1;"
+	  mysql -uroot -P ${local_port} -e "set global super_read_only=1;"
+	  echo -e "\n[$green $(date +%H:%M:%S)]: Congratulations!MySQL standby server has been configured successfully,Enjoy it!"
+    else
+	  echo -e "\n[$red $(date +%H:%M:%S)]:  IO thread status is $io_thread,but SQL thread status is $sql_thread!"
+          exit 1
+    fi
+  else
+    echo -e "\n[$red $(date +%H:%M:%S)]: IO thread status is $io_thread!"
+    exit 1
+  fi
+}
+
+read_option() {
+#read -n1 -p "Please Enter your choice []:" option
+  echo -e -n "[$green $(date +%H:%M:%S)]: Please Enter your choice []:" 
+  read option
+    case ${option} in
+    0)
+      major=5.7
+      prepare_pkg
+      install_57
+      exit 1
+      ;;
+    1)
+      major=8.0
+      prepare_pkg
+      install_80
+      exit 1
+      ;;
+    2)
+      deinstall
+      exit 1
+      ;;
+    3)
+      start_mysql
+      exit 1
+      ;;
+    4)
+      stop_mysql
+      exit 1
+      ;;
+    5)
+      echo -e "\n[$green $(date +%H:%M:%S)]: Starting change mysql root password\n"
+      cnt=0
+      change_pass
+      exit 1
+      ;;
+    6)
+	  back_dir
+	  binlogback
+      ;;
+    7)
+      #echo "phisycal backup coming soon..."
+      #exit 1
+	  back_dir
+	  phisycalback
+      ;;
+    8)
+      mydumper -V >/dev/null 2>&1
+      if [[ $? -gt 0 ]]; then
+      	#echo -e "\n[$red $date]: mydumper has not been installed,install mydumper first!"
+      	#exit 1
+        install_mydumper
+      fi
+        echo ""
+      	echo "`mydumper -V`"
+        echo ""
+      	echo "[0] dump full database"
+      	echo "[1] dump part database"
+      	echo "[2] dump tables "
+      	echo "[q] quit dump"
+      	echo ""
+      	dump_option
+        exit 1
+      ;;
+    9)
+      #echo "logical backup coming soon..."
+      #exit 1
+	  back_dir
+	  logicalback
+      ;;
+    10)
+      upgrade
+      exit 1
+      ;;
+    11)
+      config_slave
+      exit 1
+      ;;
+    q)
+      echo -e "\n[$green $(date +%H:%M:%S)]: Exit this program.\n"
+      exit 0
+      ;;
+    *)
+      echo -e "\n[$yellow $(date +%H:%M:%S)]: Bad Choice!Again.\n"
+      read_option
+      ;;
+    esac
+}
+
+#start
+if [ $# -lt 1 ]; then
+    echo "**********************************************************"
+    echo "*                                                        *"
+    echo "*    Welcome to MySQL Pilot,Current version ${version}    *"
+    echo "*                                                        *"
+    echo "*    Pilot is Use to DevOps MySQL 5.7 & 8.0 in Linux     *"
+    echo "*                                                        *"
+    echo "**********************************************************"
+    echo ""
+    echo "[0]  Install   MySQL 5.7 Community Server"
+    echo "[1]  Install   MySQL 8.0 Community Server"
+    echo "[2]  Deinstall MySQL Community Server"
+    echo "[3]  Start     MySQL Community Server "
+    echo "[4]  Stop      MySQL Community Server "
+    echo "[5]  Change    MySQL root password"
+    echo "[6]  Backup    MySQL Server in binlog "
+    echo "[7]  Backup    MySQL Server in Xtrabackup[Phisycal] "
+    echo "[8]  Backup    MySQL Server in mydumper  [Logical manual] "
+    echo "[9]  Backup    MySQL Server in mysqldump [Logical auto] "
+    echo "[10] Upgrade   MySQL Community Server    [In_Place]"
+    echo "[11] Config    MySQL Replica Server      [1M1R]"	
+    echo "[q]  Quit"
+    echo ""
+    read_option 
+    exit 1
+else
+    echo "./MyPilot or sh Mypilot to run this tool!"
+    exit 1
+fi
+
+
